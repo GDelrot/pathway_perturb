@@ -1,16 +1,36 @@
 """
-Extract Drug/Cell Line Perturbation Data from SigComLincs
-====================================================
-This script focuses data extraction from gctx file,
-filtering of entities through metadata and configs
+LINCS and CCLE Data Loader
+==========================
+Provides dataclasses for file path configuration and a Loader class that
+handles ingestion of two complementary datasets:
+
+  - **LINCS L1000** (via SigComLINCS): level-5 compound-perturbation expression
+    data (.gctx), pre-computed GSEA pathway scores (.parquet), and associated
+    metadata (sig_info, inst_info, gene_info, cell_info, compound_info).
+    Filtering by Transcriptional Activity Score (TAS) and perturbation type
+    restricts the working set to high-quality drug treatments only.
+
+  - **CCLE**: RNA-seq transcriptomics (.gct), metabolomics (.csv), and cell-line
+    annotations (.tsv).
+
+Typical usage
+-------------
+    lincs = LINCSpaths(gctx=..., pathway=..., sig_info=..., inst_info=...)
+    ccle  = CCLEpaths(transcriptomics=..., metabolomics=..., cell_annotations=...)
+
+    loader = Loader(lincs, ccle)
+    loader.load_l1000_metadata()
+    valid_ids = loader.tas_filtering(tas_threshold=0.2)
+    loader.extract_data_ids(valid_ids)
+    loader.load_ccle_data()
 """
 from dataclasses import dataclass
 from typing import cast, Optional
 
+from idna import alabel
 import pandas as pd
 from cmapPy.pandasGEXpress.parse_gct import parse as parse_gct
 from cmapPy.pandasGEXpress.parse_gctx import parse
-from pathways import Pathways
 
 @dataclass
 class LINCSpaths:
@@ -59,6 +79,7 @@ class CCLEpaths:
     transcriptomics: str
     metabolomics: str
     cell_annotations: str
+    metabo_mapping: str
 
 class Loader:
     """
@@ -104,6 +125,7 @@ class Loader:
         self.ccle_transcriptomics = pd.DataFrame()
         self.ccle_metabolomics = pd.DataFrame()
         self.ccle_annotation = pd.DataFrame()
+        self.metabo_mapping = pd.DataFrame()
 
     def load_l1000_metadata(self):
         """
@@ -268,7 +290,6 @@ class Loader:
         self.ccle_annotation : pd.DataFrame
             Cell line annotation table loaded from a tab-separated file.
         """
-
         # Transcriptomics data
         print(f'\n Loading CCLE transcriptomics data file :{self.ccle_paths.transcriptomics}')
         self.ccle_transcriptomics = parse_gct(
@@ -279,14 +300,65 @@ class Loader:
         # Metabolomics data
         print(f'\n Loading CCLE metabolomics data file :{self.ccle_paths.metabolomics}')
         self.ccle_metabolomics = pd.read_csv(
-            self.ccle_paths.metabolomics
+            self.ccle_paths.metabolomics,
+            index_col= 0
         )
+        self.ccle_metabolomics = self.ccle_metabolomics.drop(labels='DepMap_ID', axis = 1)
         print(self.ccle_metabolomics.head())
 
         # Cell annotation file
-        print(f'\n Loading CCLE metabolomics data file :{self.ccle_paths.metabolomics}')
+        print(f'\n Loading CCLE annotations data file :{self.ccle_paths.cell_annotations}')
         self.ccle_annotation = pd.read_table(
             self.ccle_paths.cell_annotations,
+            index_col=0,
             sep = '\t'
         )
         print(self.ccle_annotation.head())
+        print(('\n Loading CCLE metabolite annotations '
+                f'data file :{self.ccle_paths.metabo_mapping}'))
+        self.metabo_mapping = pd.read_csv(
+            self.ccle_paths.metabo_mapping
+        )
+        print(self.metabo_mapping.head())
+
+    def preprocess_metabolomics(self,
+                                remove_lipids: bool,
+                                convert_ids:bool):
+        """
+        Filter the metabolomics matrix to retain only KEGG-mapped metabolites.
+
+        Drops columns whose Query name has no KEGG ID in ``self.metabo_mapping``.
+        Optionally removes lipid columns — defined as any column not present in
+        the ``Query`` column of the mapping table.
+
+        Parameters
+        ----------
+        remove_lipids : bool
+            If True, additionally drop all metabolites that have no entry in
+            ``self.metabo_mapping['Query']`` (i.e. lipids not covered by the
+            KEGG mapping file).
+
+        Modifies
+        --------
+        self.ccle_metabolomics : pd.DataFrame
+            Updated in-place with unmapped (and optionally lipid) columns removed.
+        """
+        print(self.metabo_mapping['KEGG'].isna().sum())
+        name_mapping = dict(zip(self.metabo_mapping['Query'], self.metabo_mapping['KEGG']))
+        unmapped = [k for k, v in name_mapping.items() if pd.isna(v)]
+        print(f'N metabolites with no kegg ids: {len(unmapped)}')
+
+        print(self.ccle_metabolomics.columns)
+        self.ccle_metabolomics = self.ccle_metabolomics.drop(labels=unmapped,axis=1)
+        print(self.ccle_metabolomics.shape)
+
+        if remove_lipids:
+            query_set = set(self.metabo_mapping['Query'])
+            lipids = [col for col in self.ccle_metabolomics if col not in query_set]
+            self.ccle_metabolomics =self.ccle_metabolomics.drop(labels=lipids,axis=1)
+            print(f'\n Removed n lipids: {len(lipids)}')
+            print(f'\n Metabolomics matrix shape: {self.ccle_metabolomics.shape}')
+
+        if convert_ids:
+            self.ccle_metabolomics = self.ccle_metabolomics.rename(columns=name_mapping)
+            print(self.ccle_metabolomics.columns)

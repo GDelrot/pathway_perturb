@@ -5,11 +5,9 @@ Portions of this file are adapted from the sspa library:
 #   GitHub: https://github.com/cwieder/py-sspa
 #   License: MIT
 """
-import json
-import time
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
-from pathlib import Path
+from dataclasses import dataclass
+from typing import Dict, Optional
+import re
 import requests
 from tqdm import tqdm
 import pandas as pd
@@ -78,7 +76,8 @@ class Pathways():
         Args:
             organism (str): KEGG 3 letter organism code
             filepath (str): filepath to save pathway file to, default is None - save to variable
-            omics_type(str): type of omics pathways to download (metabolomics, transcriptomics, or multiomics)
+            omics_type(str): type of omics pathways to download
+            (metabolomics, transcriptomics, or multiomics)
         Returns: 
             GMT-like pd.DataFrame containing KEGG pathways
         '''
@@ -109,7 +108,7 @@ class Pathways():
         if omics_type == 'metabolomics':
             pathway_compound_mapping = dict()
 
-            for index, i in enumerate(tqdm(pathway_ids)):
+            for _, i in enumerate(tqdm(pathway_ids)):
                 complist = []
                 current_url = base_url + i
                 page = requests.get(current_url, timeout=600)
@@ -188,7 +187,7 @@ class Pathways():
             for index, i in enumerate(tqdm(pathway_ids)):
                 genelist = []
                 current_url = base_url + i
-                page = requests.get(current_url)
+                page = requests.get(current_url,timeout=300)
                 lines = page.text.split("\n")
 
                 try:
@@ -286,50 +285,3 @@ class Pathways():
         # Store both
         self._store_pathways(omics, pathway_dict, gmt)
 
-    def convert_metabolite_ids(self,
-                            input_type: str,
-                            compound_list: list) -> pd.DataFrame:
-        """
-        Use MetaboAnalyst API for metabolite identifier conversion.
-
-        Adapted from sspa.utils.identifier_conversion():
-        https://github.com/cwieder/py-sspa/blob/main/sspa/utils.py
-        Wieder, C. et al. (2022). sspa: A Python package for single-sample
-        pathway analysis. License: MIT
-
-        Args:
-            input_type (str): Identifier type present in input data.
-                One of: 'name', 'hmdb', 'pubchem', 'chebi', 'metlin', 'kegg'
-            compound_list (list): List of identifiers to convert.
-
-        Returns:
-            pd.DataFrame: DataFrame containing identifier matches.
-
-        Raises:
-            NotImplementedError: If input_type is not 'name'.
-            requests.exceptions.RequestException: If the API call fails.
-        """
-        if input_type != 'name':
-            raise NotImplementedError(
-                "Currently the MetaboAnalyst API only converts "
-                "from compound names to other identifiers."
-            )
-
-        print("Commencing ID conversion using MetaboAnalyst API...")
-
-        url = "https://www.xialab.ca/api/mapcompounds"
-
-        payload = json.dumps({
-            "queryList": ";".join(compound_list) + ",",
-            "inputType": input_type
-        })
-
-        headers = {
-            "Content-Type": "application/json",
-            "cache-control": "no-cache",
-        }
-
-        response = requests.post(url, data=payload, headers=headers, timeout=120)
-        response.raise_for_status()  # raises an exception on HTTP 4xx/5xx
-
-        return pd.DataFrame(response.json())
