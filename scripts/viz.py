@@ -43,6 +43,33 @@ def plot_pca(
     else:
         plt.show()
 
+def plot_umap(
+    umap_plot: pd.DataFrame,       # must contain UMAP1, UMAP2, and hue_col
+    hue_col: str = 'cell_line',   # what to color by
+    out_path: str = '',            # if None, just show interactively
+    title: str = 'UMAP',
+):
+    """
+    Scatter UMAP plot colored by a categorical column.
+    Mirrors plot_pca() structure.
+    """
+    fig, ax = plt.subplots(figsize=(14, 11))
+    sns.scatterplot(
+        data=umap_plot, x="UMAP1", y="UMAP2",
+        hue=hue_col, alpha=0.8, s=10, linewidth=0, ax=ax
+    )
+    ax.set_xlabel("UMAP1")
+    ax.set_ylabel("UMAP2")
+    ax.set_title(title)
+    ax.legend(bbox_to_anchor=(1.01, 1), loc='upper left', markerscale=2)
+    plt.tight_layout()
+    
+    if out_path:
+        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
+
 def plot_pca_density(pca_df: pd.DataFrame, hue_col : str,explained_var,
                     title: str, out_path: Path) -> None:
     """

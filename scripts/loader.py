@@ -27,7 +27,6 @@ Typical usage
 from dataclasses import dataclass
 from typing import cast, Optional
 
-from idna import alabel
 import pandas as pd
 from cmapPy.pandasGEXpress.parse_gct import parse as parse_gct
 from cmapPy.pandasGEXpress.parse_gctx import parse
@@ -80,6 +79,7 @@ class CCLEpaths:
     metabolomics: str
     cell_annotations: str
     metabo_mapping: str
+    depmap_annotation: str
 
 class Loader:
     """
@@ -126,6 +126,7 @@ class Loader:
         self.ccle_metabolomics = pd.DataFrame()
         self.ccle_annotation = pd.DataFrame()
         self.metabo_mapping = pd.DataFrame()
+        self.depmap_annotation = pd.DataFrame()
 
     def load_l1000_metadata(self):
         """
@@ -202,7 +203,7 @@ class Loader:
     def load_l1000_pathway_scores(self):
         """
         load the pre-computed GSEA pathway scores derived from l1000 level 
-        5 data from SigComLINCS (CD)
+        5 data from SigComLINCS (CD) (computed with min_size = 15)
         """
         print(f'\n Loading data from file: {self.lincs_paths.pathway}')
         self.l1000_pathway_data= pd.read_parquet(
@@ -292,9 +293,9 @@ class Loader:
         """
         # Transcriptomics data
         print(f'\n Loading CCLE transcriptomics data file :{self.ccle_paths.transcriptomics}')
-        self.ccle_transcriptomics = parse_gct(
+        self.ccle_transcriptomics = cast(pd.DataFrame, parse_gct(
             file_path=self.ccle_paths.transcriptomics
-        ).data_df
+        ).data_df.T)
         print(self.ccle_transcriptomics.head())
 
         # Metabolomics data
@@ -320,10 +321,17 @@ class Loader:
             self.ccle_paths.metabo_mapping
         )
         print(self.metabo_mapping.head())
+        print(('\n Loading depmap annotations '
+                f'data file :{self.ccle_paths.depmap_annotation}'))
+        self.depmap_annotation = pd.read_csv(
+            self.ccle_paths.depmap_annotation
+        )
+        print(self.depmap_annotation.head())
 
     def preprocess_metabolomics(self,
-                                remove_lipids: bool,
-                                convert_ids:bool):
+                                split_lipids: bool,
+                                convert_ids:bool,
+                                remove_unmapped:bool):
         """
         Filter the metabolomics matrix to retain only KEGG-mapped metabolites.
 
@@ -343,22 +351,34 @@ class Loader:
         self.ccle_metabolomics : pd.DataFrame
             Updated in-place with unmapped (and optionally lipid) columns removed.
         """
+        lipids_proc = pd.DataFrame()
+        metabo_proc = self.ccle_metabolomics
+
         print(self.metabo_mapping['KEGG'].isna().sum())
         name_mapping = dict(zip(self.metabo_mapping['Query'], self.metabo_mapping['KEGG']))
         unmapped = [k for k, v in name_mapping.items() if pd.isna(v)]
         print(f'N metabolites with no kegg ids: {len(unmapped)}')
 
-        print(self.ccle_metabolomics.columns)
-        self.ccle_metabolomics = self.ccle_metabolomics.drop(labels=unmapped,axis=1)
-        print(self.ccle_metabolomics.shape)
+        print(metabo_proc.columns)
+        if remove_unmapped:
+            metabo_proc = metabo_proc.drop(labels=unmapped,axis=1)
+        print(metabo_proc.shape)
 
-        if remove_lipids:
+        if split_lipids:
             query_set = set(self.metabo_mapping['Query'])
-            lipids = [col for col in self.ccle_metabolomics if col not in query_set]
-            self.ccle_metabolomics =self.ccle_metabolomics.drop(labels=lipids,axis=1)
+            kegg_set  = set(self.metabo_mapping['KEGG'].dropna())
+
+            lipids = [
+                col for col in metabo_proc.columns
+                if col not in query_set and col not in kegg_set
+            ]
+            lipids_proc = metabo_proc.loc[:,lipids]
+            metabo_proc = metabo_proc.drop(columns=lipids)
             print(f'\n Removed n lipids: {len(lipids)}')
-            print(f'\n Metabolomics matrix shape: {self.ccle_metabolomics.shape}')
+            print(f'\n Metabolomics matrix shape: {metabo_proc.shape}')
 
         if convert_ids:
-            self.ccle_metabolomics = self.ccle_metabolomics.rename(columns=name_mapping)
-            print(self.ccle_metabolomics.columns)
+            metabo_proc = metabo_proc.rename(columns=name_mapping)
+            print(metabo_proc.columns)
+
+        return metabo_proc, lipids_proc

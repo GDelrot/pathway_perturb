@@ -1,6 +1,7 @@
 """ This script holds analysis function that will be applied onto
 the l1000 data from sigcom lincs
 """
+from csv import Error
 from typing import Dict, List, cast
 
 import gseapy as gp
@@ -8,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import  PCA
 from sklearn.preprocessing import StandardScaler
+from umap import UMAP
 
 def run_pca(matrix: pd.DataFrame, n_components: int = 10):
     """Takes any matrix, returns scores + fitted model."""
@@ -21,6 +23,43 @@ def run_pca(matrix: pd.DataFrame, n_components: int = 10):
 
     return pd.DataFrame(pca_scores, index=sample_ids,
                         columns=[f"PC{i+1}" for i in range(n_components)]), pca
+
+def run_umap(matrix: pd.DataFrame,
+            n_components: int = 2,n_neighbors: int = 15,
+            min_dist: float = 0.1):
+    """
+    Takes any matrix, returns scores + fitted model (UMAP version).
+    
+    Args:
+        matrix: pd.DataFrame with samples as rows, features as columns
+        n_components: number of dimensions (usually 2 for visualization)
+        n_neighbors: size of local neighborhood (5-50, default 15)
+        min_dist: minimum distance between points (0.0-0.99, default 0.1)
+    
+    Returns:
+        umap_scores: DataFrame with UMAP coordinates
+        umap_model: fitted UMAP object
+    """
+    sample_ids = matrix.index
+
+    # Scale data (same as PCA)
+    scaler = StandardScaler(copy=False)
+    scaled = scaler.fit_transform(matrix.astype(np.float32))
+
+    # Fit UMAP
+    umap_model = UMAP(
+        n_components=n_components,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        random_state=42  # For reproducibility
+    )
+    umap_scores = umap_model.fit_transform(scaled)
+    
+    return pd.DataFrame(
+        umap_scores, 
+        index=sample_ids,
+        columns=[f"UMAP{i+1}" for i in range(n_components)]
+    ), umap_model
 
 def run_gsea(gene_matrix: pd.DataFrame, pathways: Dict) -> pd.DataFrame:
     """Run preranked GSEA for each perturbation in the gene matrix.
@@ -66,7 +105,8 @@ def run_gsea(gene_matrix: pd.DataFrame, pathways: Dict) -> pd.DataFrame:
 def run_gsva(omics_matrix: pd.DataFrame,
              pathways_dict: Dict[str, List[str]],
              min_size: int,
-             max_size: int) -> pd.DataFrame:
+             max_size: int,
+             omics:str) -> pd.DataFrame:
     """Run GSVA.
     Args:
         omics_matrix: DataFrame of shape (samples, metabolites).
@@ -76,12 +116,21 @@ def run_gsva(omics_matrix: pd.DataFrame,
     Returns:
         DataFrame of shape (samples, pathways) with GSVA scores.
     """
+    if omics == 'metabolomics':
+        kcdf = 'Gaussian'
+
+    elif omics == "transcriptomics":
+        kcdf = 'Poisson'
+
+    else:
+        raise ValueError(f"Unsupported omics type: {omics!r}. Expected 'metabolomics' or 'transcriptomics'.")
+
     res = gp.gsva(
         data=omics_matrix.T,
         gene_sets=pathways_dict,#type:ignore
         min_size=min_size,
         max_size=max_size,
-        kcdf="Gaussian",
+        kcdf=kcdf,
     )
     gsva_matrix = cast(pd.DataFrame,res.res2d).pivot(index='Name', columns='Term', values='ES')
 

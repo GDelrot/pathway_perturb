@@ -44,6 +44,7 @@ class Pathways():
         self.kegg_metabolomics: PathwayData = PathwayData()
         self.kegg_transcriptomics: PathwayData = PathwayData()
         self.kegg_multiomics: PathwayData = PathwayData()
+        self.pathway_names : Dict
 
     def _get_pathway_data(self, omics_type: str) -> PathwayData:
         """
@@ -257,31 +258,60 @@ class Pathways():
 
         return converted
 
-    def load_gmt(self,
-                 path: str,
-                 omics: str):
+    def load_gmt(self, path: str, omics: str):
         """
         Loads an existing pathway gmt file and stores both the dict
         and DataFrame representations.
-
+        Converts gene IDs to a common format (symbols for transcriptomics).
+        
         Args:
             path (str): path to existing gmt
             omics (str): omics type ('metabolomics', 'transcriptomics', or 'multiomics')
         """
-        # Load the gmt as a DataFrame
-        gmt = pd.read_csv(path, sep='\t',header=None)
+        # Load as strings
+        gmt = pd.read_csv(path, sep='\t', header=None, dtype=str)
+        self.pathway_names = dict(zip(gmt.loc[:,gmt.columns[0]],gmt.loc[:,gmt.columns[1]]))
         gmt.drop(columns=gmt.columns[1], inplace=True)
         gmt.set_index(keys=gmt.columns[0], inplace=True, drop=True)
-
-        # Also build the dict representation
+        
         pathway_dict = {}
-        for pathway in gmt.index:
-            genes = gmt.loc[pathway].dropna()
-            pathway_dict[pathway] = [
-                str(int(g)) if isinstance(g, float) else str(g)
-                for g in genes
-            ]
+        
+        if omics == 'transcriptomics':
+            # Step 1: Extract all Entrez gene IDs from GMT
+            all_entrez_ids = set()
+            for pathway in gmt.index:
+                genes = gmt.loc[pathway].dropna()
+                # Convert to int then str to clean up decimals
+                entrez_ids = [str(int(float(g))) for g in genes]
+                all_entrez_ids.update(entrez_ids)
+            
+            print(f"Converting {len(all_entrez_ids)} Entrez IDs to symbols...")
 
-        # Store both
+            # Step 2: Batch convert Entrez IDs → symbols
+            conversion = self.convert_gene_ids(
+                input_ids=list(all_entrez_ids),
+                source='entrezgene',
+                target='symbol',
+                species='human'
+            )
+
+            # Step 3: Build pathway dict with converted symbols
+            for pathway in gmt.index:
+                genes = gmt.loc[pathway].dropna()
+                entrez_ids = [str(int(float(g))) for g in genes]
+                # Convert to symbols, skip any that didn't convert (None values)
+                symbols = [
+                    conversion[eid] for eid in entrez_ids
+                    if conversion.get(eid) is not None
+                ]
+                if symbols:  # Only keep pathways with at least one mapped gene
+                    pathway_dict[pathway] = symbols
+            
+            print(f"Converted {len(pathway_dict)} pathways with symbol mapping")
+            
+        elif omics == 'metabolomics':
+            for pathway in gmt.index:
+                met = gmt.loc[pathway].dropna()
+                pathway_dict[pathway] = [str(m).strip() for m in met]
+        
         self._store_pathways(omics, pathway_dict, gmt)
-
