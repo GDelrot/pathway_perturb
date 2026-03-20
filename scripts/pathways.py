@@ -6,7 +6,7 @@ Portions of this file are adapted from the sspa library:
 #   License: MIT
 """
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional,List
 import re
 import requests
 from tqdm import tqdm
@@ -143,7 +143,7 @@ class Pathways():
         if omics_type == 'multiomics':
             pathway_mapping = dict()
 
-            for index, i in enumerate(tqdm(pathway_ids)):
+            for _, i in enumerate(tqdm(pathway_ids)):
                 complist = []
                 genelist = []
                 current_url = base_url + i
@@ -315,3 +315,83 @@ class Pathways():
                 pathway_dict[pathway] = [str(m).strip() for m in met]
         
         self._store_pathways(omics, pathway_dict, gmt)
+        
+    def pathway_intersections(self,
+                          rna_pathways: Dict,
+                          metabo_pathways: Dict,
+                          metabolite_ms: List,
+                          rna_ms: List,
+                          l1000_pathways: List,
+                          metabo_thresholds: List):
+        """
+        Find pathway intersections across three datasets at different metabolite thresholds.
+        """
+        # Convert to sets once (for performance)
+        metabolite_set = set(metabolite_ms)
+        rna_set = set(rna_ms)
+        l1000_set = set(l1000_pathways)
+        print(l1000_pathways)
+        # ===== FILTER RNA PATHWAYS (FIXED THRESHOLD) =====
+        rna_path_measured = {
+            k: [rna for rna in v if rna in rna_set]
+            for k, v in rna_pathways.items()
+        }
+
+        rna_threshold = 15  # Make this a parameter if flexible
+        rna_path_filtered = {
+            k: v for k, v in rna_path_measured.items()
+            if len(v) >= rna_threshold
+        }
+        rna_pathways_set = set(rna_path_filtered.keys())
+
+        print("=" * 60)
+        print("RNA PATHWAYS REPORT")
+        print("=" * 60)
+        print(f"RNA genes measured: {len(rna_set)}")
+        print(f"RNA pathways with ≥{rna_threshold} genes: {len(rna_pathways_set)}\n")
+
+        # ===== FILTER METABOLOMICS PATHWAYS (VARIABLE THRESHOLDS) =====
+        results = {}
+
+        print("=" * 60)
+        print("METABOLOMICS PATHWAYS BY THRESHOLD")
+        print("=" * 60)
+        print(f"Metabolites measured: {len(metabolite_set)}")
+        print(f"L1000 reference pathways: {len(l1000_set)}\n")
+
+        for threshold in metabo_thresholds:
+            # Filter metabolomics pathways
+            met_path_measured = {
+                k: [met for met in v if met in metabolite_set]
+                for k, v in metabo_pathways.items()
+            }
+
+            met_path_filtered = {
+                k: v for k, v in met_path_measured.items()
+                if len(v) >= threshold
+            }
+
+            met_pathways_set = set(met_path_filtered.keys())
+
+            # Triple intersection
+            pathway_inter = met_pathways_set & rna_pathways_set & l1000_set
+
+            # Store results
+            results[threshold] = {
+                'pathways': pathway_inter,
+                'count': len(pathway_inter),
+                'met_pathways_count': len(met_pathways_set)
+            }
+
+            # Print report for this threshold
+            print(f"Threshold: ≥{threshold} metabolites")
+            print(f"  ├─ Metabolomics pathways: {len(met_pathways_set)}")
+            print(f"  ├─ Intersecting with RNA: {len(met_pathways_set & rna_pathways_set)}")
+            print(f"  └─ Triple intersection (Metabo ∩ RNA ∩ L1000): {len(pathway_inter)}")
+
+            if pathway_inter:
+                print(f"     Pathways: {sorted(pathway_inter)}\n")
+            else:
+                print(f"     (No intersecting pathways)\n")
+
+        return results

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=CCLE
-#SBATCH --output=outputs/slurmouts/l1000_out_%j.log   # stdout
-#SBATCH --error=outputs/slurmouts/l1000_err_%j.log     # stderr separately
+#SBATCH --output=/home/gdelrot/pathway_perturb/outputs/slurmouts/l1000_out_%j.log   # stdout
+#SBATCH --error=/home/gdelrot/pathway_perturb/outputs/slurmouts/l1000_err_%j.log     # stderr separately
 #SBATCH --mem=32GB                        
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=4

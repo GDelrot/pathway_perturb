@@ -115,7 +115,7 @@ def plot_pca_joint(pca_df: pd.DataFrame, explained_var,
     plt.close()
 
 def plot_pca_centroids(pca_df: pd.DataFrame, explained_var,
-                       title:str,hue_col:str,out_path: Path) -> None:
+                       title:str,hue_col:str,out_path: str) -> None:
     """
     Plots per-group centroids with std ellipses. 
     Summarizes 60k points into interpretable group positions.
