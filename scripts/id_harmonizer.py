@@ -134,9 +134,10 @@ def build_l1000_sig_to_cellosaurus(
     #
     # sig_info is the master metadata table for all L1000 signatures.
     # We extract the columns we need for the ML pipeline.
-
+    print(sig_info)
+    print(cell_info)
     needed_cols = ['sig_id', 'cell_iname']
-    drug_cols = ['pert_id', 'pert_iname']
+    drug_cols = ['pert_id', 'cmap_name']
 
     # Add drug columns if available
     for col in drug_cols:
@@ -173,7 +174,6 @@ def build_l1000_sig_to_cellosaurus(
                 f"({n_mapped/n_total*100:.1f}%)")
 
     return merged
-
 
 def harmonize_ids(
     ccle_transcriptomics: pd.DataFrame,
@@ -276,7 +276,7 @@ def harmonize_ids(
 
     # The L1000 pathway data is indexed by sig_id (the 'cid' column).
     # We need to join it with our mapping.
-
+    print(l1000_pathway_data.head())
     l1000_harmonized = l1000_pathway_data.copy()
     l1000_harmonized = l1000_harmonized.reset_index()
 
@@ -311,10 +311,12 @@ def harmonize_ids(
           f"({n_after/n_before*100:.1f}%)")
 
     # Rename to standard columns expected by ML pipeline
-    l1000_harmonized = l1000_harmonized.rename(index={
+    print(l1000_harmonized.columns)
+    print(l1000_harmonized.head())
+    l1000_harmonized = l1000_harmonized.rename(columns={
         'cellosaurus_id': 'cell_id',
     })
-
+    print(l1000_harmonized.columns)
     # Set drug_id: prefer pert_iname (human-readable) over pert_id (Broad ID)
     if 'pert_iname' in l1000_harmonized.columns:
         l1000_harmonized = l1000_harmonized.rename(columns={'pert_iname': 'drug_id'})

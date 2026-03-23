@@ -6,7 +6,7 @@ Portions of this file are adapted from the sspa library:
 #   License: MIT
 """
 from dataclasses import dataclass
-from typing import Dict, Optional,List
+from typing import Dict, Optional,List,cast
 import re
 import requests
 from tqdm import tqdm
@@ -63,7 +63,7 @@ class Pathways():
         Stores both representations into the correct PathwayData object.
         """
         pathway_data = self._get_pathway_data(omics_type)
-        pathway_data.pathways_dict = pathways_dict
+        pathway_data.pathways_dict = cast(Dict,pathways_dict)
         pathway_data.gmt = gmt
 
     def download_kegg(self,
@@ -185,7 +185,7 @@ class Pathways():
         if omics_type == 'transcriptomics':
             pathway_mapping = dict()
 
-            for index, i in enumerate(tqdm(pathway_ids)):
+            for _, i in enumerate(tqdm(pathway_ids)):
                 genelist = []
                 current_url = base_url + i
                 page = requests.get(current_url,timeout=300)
@@ -313,9 +313,9 @@ class Pathways():
             for pathway in gmt.index:
                 met = gmt.loc[pathway].dropna()
                 pathway_dict[pathway] = [str(m).strip() for m in met]
-        
+
         self._store_pathways(omics, pathway_dict, gmt)
-        
+
     def pathway_intersections(self,
                           rna_pathways: Dict,
                           metabo_pathways: Dict,
@@ -392,6 +392,6 @@ class Pathways():
             if pathway_inter:
                 print(f"     Pathways: {sorted(pathway_inter)}\n")
             else:
-                print(f"     (No intersecting pathways)\n")
+                print("     (No intersecting pathways)\n")
 
         return results

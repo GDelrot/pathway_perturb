@@ -28,7 +28,7 @@ def plot_pca(
     _, ax = plt.subplots(figsize=(14, 11))
     sns.scatterplot(
         data=pca_plot, x="PC1", y="PC2",
-        hue=hue_col, alpha=0.8, s=10, linewidth=0, ax=ax
+        hue=hue_col, alpha=0.6, s=70, linewidth=0, ax=ax
     )
     ax.set_xlabel(f"PC1 ({pc1_var:.1f}%)")
     ax.set_ylabel(f"PC2 ({pc2_var:.1f}%)")
@@ -56,14 +56,51 @@ def plot_umap(
     fig, ax = plt.subplots(figsize=(14, 11))
     sns.scatterplot(
         data=umap_plot, x="UMAP1", y="UMAP2",
-        hue=hue_col, alpha=0.8, s=10, linewidth=0, ax=ax
+        hue=hue_col, alpha=0.6, s=70, linewidth=0, ax=ax
     )
     ax.set_xlabel("UMAP1")
     ax.set_ylabel("UMAP2")
     ax.set_title(title)
     ax.legend(bbox_to_anchor=(1.01, 1), loc='upper left', markerscale=2)
     plt.tight_layout()
-    
+
+    if out_path:
+        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
+
+def plot_umap_centroids(
+    umap_plot: pd.DataFrame,       # must contain UMAP1, UMAP2, and hue_col
+    hue_col: str = 'cell_line',   # what to color by
+    out_path: str = '',            # if None, just show interactively
+    title: str = 'UMAP',
+):
+    """
+    Plots per-group centroids with std ellipses on UMAP coordinates.
+    Mirrors plot_pca_centroids() structure.
+    """
+    _, ax = plt.subplots(figsize=(14, 11))
+
+    groups = umap_plot[hue_col].unique()
+    palette = sns.color_palette('tab20', len(groups))
+
+    for color, group in zip(palette, groups):
+        subset = umap_plot[umap_plot[hue_col] == group]
+        mx, my = subset['UMAP1'].mean(), subset['UMAP2'].mean()
+        sx, sy = subset['UMAP1'].std(), subset['UMAP2'].std()
+
+        ax.scatter(mx, my, color=color, s=80, zorder=3, label=group)
+        ellipse = Ellipse((mx, my), width=2*sx, height=2*sy,
+                          color=color, alpha=0.2, zorder=2)
+        ax.add_patch(ellipse)
+
+    ax.set_xlabel("UMAP1")
+    ax.set_ylabel("UMAP2")
+    ax.set_title(title)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=7)
+    plt.tight_layout()
+
     if out_path:
         plt.savefig(out_path, dpi=150, bbox_inches='tight')
         plt.close()

@@ -17,7 +17,7 @@ MNT_L1000 = Path('/mnt/cbib/l1000/data/')
 
 def main()->None:
 
-    # Init the classes
+        # Init the classes
     lincs_sigcom = LINCSpaths(
         gctx=str(MNT_L1000 / 'cp_coeff_mat.gctx'),
         pathway=str(INPUT / 'gsea_l1000.parquet'),
@@ -45,48 +45,48 @@ def main()->None:
     loader.load_l1000_metadata()
 
     # Load pathways
-    pathways = Pathways()
-    pathways.load_gmt(path= str(INPUT / 'KEGG_hsa_pathways_compounds_R117.gmt'),
-                      omics = 'metabolomics')
-    pathways.load_gmt(path=str(INPUT / 'KEGG_hsa_pathways_transcriptomics_R117.gmt'),
-                      omics = 'transcriptomics')
+    # pathways = Pathways()
+    # pathways.load_gmt(path= str(INPUT / 'KEGG_hsa_pathways_compounds_R117.gmt'),
+    #                   omics = 'metabolomics')
+    # pathways.load_gmt(path=str(INPUT / 'KEGG_hsa_pathways_transcriptomics_R117.gmt'),
+    #                   omics = 'transcriptomics')
 
     # ===== METABOLOMICS ANALYSIS =====
     out_metabo = OUTPUT / 'out_metabo'
     if not out_metabo.is_dir():
         out_metabo.mkdir()
 
-    data_proc, _ = loader.preprocess_metabolomics(split_lipids=False,
-                                                   convert_ids=True,
-                                                   remove_unmapped=True)
-
     out_transcripto = OUTPUT / 'out_rna'
     if not out_transcripto.is_dir():
         out_transcripto.mkdir()
+
+    data_proc, _ = loader.preprocess_metabolomics(split_lipids=False,
+                                                   convert_ids=True,
+                                                   remove_unmapped=True)
 
     # Convert Ensembl IDs to gene symbols
     transcripts = loader.ccle_transcriptomics.columns.to_list()
     loader.ccle_transcriptomics.columns = [rna.split('.')[0] for rna in transcripts]
 
-    conversion = pathways.convert_gene_ids(
-        input_ids=list(loader.ccle_transcriptomics.columns),
-        source='ensembl.gene',
-        target='symbol'
-    )
-    mapped = [sym for sym, eid in conversion.items() if eid is not None]
-    loader.ccle_transcriptomics = loader.ccle_transcriptomics[mapped]
-    loader.ccle_transcriptomics.columns = [conversion[sym] for sym in mapped]
-    print(f'\n Shape of annotated genes: {loader.ccle_transcriptomics.shape}')
+    # conversion = pathways.convert_gene_ids(
+    #     input_ids=list(loader.ccle_transcriptomics.columns),
+    #     source='ensembl.gene',
+    #     target='symbol'
+    # )
+    # mapped = [sym for sym, eid in conversion.items() if eid is not None]
+    # loader.ccle_transcriptomics = loader.ccle_transcriptomics[mapped]
+    # loader.ccle_transcriptomics.columns = [conversion[sym] for sym in mapped]
+    # print(f'\n Shape of annotated genes: {loader.ccle_transcriptomics.shape}')
 
-    # ===== PATHWAY INTERSECTIONS =====
-    common_pathways = pathways.pathway_intersections(
-        rna_pathways=pathways.kegg_transcriptomics.pathways_dict,
-        metabo_pathways=pathways.kegg_metabolomics.pathways_dict,
-        metabolite_ms=data_proc.columns.to_list(),
-        rna_ms=loader.ccle_transcriptomics.columns.to_list(),
-        l1000_pathways=loader.l1000_pathway_data.columns.to_list(),
-        metabo_thresholds=[2, 3, 4, 5]
-    )
+    # # ===== PATHWAY INTERSECTIONS =====
+    # common_pathways = pathways.pathway_intersections(
+    #     rna_pathways=pathways.kegg_transcriptomics.pathways_dict,
+    #     metabo_pathways=pathways.kegg_metabolomics.pathways_dict,
+    #     metabolite_ms=data_proc.columns.to_list(),
+    #     rna_ms=loader.ccle_transcriptomics.columns.to_list(),
+    #     l1000_pathways=loader.l1000_pathway_data.columns.to_list(),
+    #     metabo_thresholds=[2, 3, 4, 5]
+    # )
 
     # ===== ID HARMONIZATION =====
     # Maps everything to Cellosaurus (CVCL_XXXX) as common identifier.
