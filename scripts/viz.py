@@ -2,7 +2,7 @@
 This script contains functions related to plotting features
 """
 from pathlib import Path
-
+from typing import Dict
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -202,3 +202,33 @@ def plot_metabo_histogram(metabo_data:pd.DataFrame,
 
     return
 
+def plot_moa_correlations(cor_dict:Dict,
+                          figname:str):
+
+    # Build long-format with intra values per MOA + inter baseline repeated for each
+    rows = []
+    for cell_line, moa_dict in cor_dict.items():
+        inter_cors = moa_dict.get('__inter_moa__', [])
+
+        for moa, cors in moa_dict.items():
+            if moa == '__inter_moa__':
+                continue
+            # Intra-MOA correlations
+            for c in cors:
+                rows.append({'cell_line': cell_line, 'moa': moa,
+                            'group': 'intra', 'correlation': c})
+            # Paired inter-MOA baseline for this MOA
+            for c in inter_cors:
+                rows.append({'cell_line': cell_line, 'moa': moa,
+                            'group': 'inter', 'correlation': c})
+
+    cor_long = pd.DataFrame(rows)
+
+    # Now plot: each MOA has two boxes side by side (intra vs inter)
+    fig, ax = plt.subplots(figsize=(14, 6))
+    sns.boxplot(data=cor_long, x='moa', y='correlation', hue='group', ax=ax)
+    ax.axhline(0, ls='--', color='grey', alpha=0.5)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=90)
+    ax.set_title('Intra-MOA vs Inter-MOA correlations')
+    plt.tight_layout()
+    plt.savefig(figname)

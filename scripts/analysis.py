@@ -1,15 +1,20 @@
 """ This script holds analysis function that will be applied onto
 the l1000 data from sigcom lincs
 """
-from csv import Error
+import itertools
+import random
 from typing import Dict, List, cast
 
 import gseapy as gp
 import numpy as np
 import pandas as pd
+import gc
+from scipy.stats import pearsonr
+from scipy.stats import spearmanr
 from sklearn.decomposition import  PCA
 from sklearn.preprocessing import StandardScaler
 from umap import UMAP
+from loader import Loader
 
 def run_pca(matrix: pd.DataFrame, n_components: int = 10):
     """Takes any matrix, returns scores + fitted model."""
@@ -54,7 +59,7 @@ def run_umap(matrix: pd.DataFrame,
         random_state=42  # For reproducibility
     )
     umap_scores = umap_model.fit_transform(scaled)
-    
+
     return pd.DataFrame(
         umap_scores, 
         index=sample_ids,
@@ -135,3 +140,171 @@ def run_gsva(omics_matrix: pd.DataFrame,
     gsva_matrix = cast(pd.DataFrame,res.res2d).pivot(index='Name', columns='Term', values='ES')
 
     return gsva_matrix
+
+def annotate_drug_info(l1000_obj:Loader,
+                       drug:str='moa'):
+    """
+    Annotates the l1000 pathway scores with drug metadata
+
+    Args:
+        drug (str, optional): _description_. Defaults to 'moa'.
+    """
+    annotated_l1000 = pd.DataFrame()
+    if drug == 'moa':
+
+        # Duplicates in chemical tables due to several targets per drugs
+        chemical_table = l1000_obj.compound_info.copy()
+        sig_info = l1000_obj.sig_info.loc[:,['pert_id','sig_id']]
+
+        chemical_table = chemical_table.drop(columns=['target']).drop_duplicates(subset='pert_id').copy()
+        drug_metadata = pd.merge(sig_info, chemical_table, on='pert_id',how = 'left')
+        drug_metadata = drug_metadata.dropna(subset=drug)
+        drug_metadata = drug_metadata.set_index('sig_id')[drug]
+
+        pert_drugs = set(drug_metadata.index)
+        l1000_index = set(l1000_obj.l1000_pathway_data.index)
+
+        common_samples = l1000_index.intersection(pert_drugs)
+        l1000_pathway_data = l1000_obj.l1000_pathway_data.loc[list(common_samples)].copy()
+        annotated_l1000 = l1000_pathway_data.join(drug_metadata,how='left')
+        l1000_index = set(annotated_l1000.index)
+
+    return annotated_l1000
+
+def annotate_cell_info(l1000_drug_ann:pd.DataFrame,
+                       l1000_obj:Loader,
+                       filter_cell_line=None):
+    """Merge cell line annotations onto a drug-annotated DataFrame.
+
+    Joins sig_info and cell_info on cell_iname, then left-joins onto
+    l1000_drug_ann by sig_id. Optionally filters to a subset of cell lines.
+    """
+    cell_info = l1000_obj.cell_info.copy()
+    sig_info = l1000_obj.sig_info.copy()
+
+    cell_annotations = pd.merge(sig_info,cell_info,on='cell_iname')
+    cell_annotations = cell_annotations.dropna(subset='cell_iname')
+    cell_annotations = cell_annotations.set_index('sig_id')['cell_iname']
+
+    annotated_df = l1000_drug_ann.join(cell_annotations,how='left')
+
+    if filter_cell_line:
+        annotated_df = annotated_df[annotated_df['cell_iname'].isin(filter_cell_line)]
+    print(annotated_df.shape)
+    print(annotated_df.head())
+
+    return annotated_df
+
+def run_cor(vector_a:np.array,
+            vector_b:np.array,
+            cor_type:str='pearson'):
+    """Compute pairwise correlation between two vectors.
+
+    Returns the correlation statistic (float). Supports 'pearson' and 'spearman'.
+    """
+    # Drop metadata columns, keep only pathway score columns
+    a_vec = vector_a
+    b_vec = vector_b
+
+    if cor_type == 'pearson':
+        
+        cor_stat = pearsonr(a_vec,b_vec).statistic
+    elif cor_type == 'spearman':
+
+        cor_stat = spearmanr(a_vec,b_vec).statistic
+    else:
+        raise ValueError(f'Unsupported cor type: {cor_type}')
+
+    return cor_stat
+
+def sample_inter_moa_correlations(l1000_subset, feature_cols, n_samples, cor_type='pearson'):
+    """
+    Sample random pairs of perturbations from DIFFERENT MOAs.
+    n_samples should match the total number of intra-MOA pairs for comparability.
+    """
+    indexed_by_moa = l1000_subset.groupby('moa').groups  # {moa: [sig_ids]}
+    moas = list(indexed_by_moa.keys())
+    
+    inter_cors = []
+    features = l1000_subset[feature_cols]
+    
+    for _ in range(n_samples):
+        # Pick two different MOAs
+        moa_a, moa_b = random.sample(moas, 2)
+        # Pick one random perturbation from each
+        sig_a = random.choice(indexed_by_moa[moa_a])
+        sig_b = random.choice(indexed_by_moa[moa_b])
+        
+        cor = run_cor(features.loc[sig_a], features.loc[sig_b], cor_type=cor_type)
+        inter_cors.append(cor)
+    
+    return inter_cors
+
+def run_moa_signature_correlations(l1000_obj:Loader,
+                                filter_cell_line=None,
+                               metadata:str='moa',
+                               cor_type:str='pearson'):
+    """Compute intra- vs inter-MOA signature correlations per cell line.
+
+    For each cell line, computes pairwise correlations for all perturbation
+    pairs sharing the same MOA (intra), then samples an equal number of
+    cross-MOA pairs (inter, stored under '__inter_moa__').
+
+    Returns a summary DataFrame of mean absolute correlations
+    (shape: n_cell_lines x n_moas) and the full correlation_results dict.
+    """
+    # Annotate drug info
+    l1000_drug_annotated = annotate_drug_info(l1000_obj=l1000_obj,
+                                              drug=metadata)
+
+    # Annotate cell info
+    pair_annotated = annotate_cell_info(l1000_drug_ann=l1000_drug_annotated,
+                                        filter_cell_line=filter_cell_line,
+                                        l1000_obj=l1000_obj)
+    
+    metadata_cols = [metadata, 'cell_iname']
+    feature_cols = [c for c in pair_annotated.columns if c not in metadata_cols]
+    correlation_results = {}
+
+    for cell_line in pair_annotated['cell_iname'].unique():
+
+        correlation_results[cell_line] = {}
+
+        cl_perts = pair_annotated[pair_annotated['cell_iname'] == cell_line].index
+        l1000_subset = pair_annotated.loc[cl_perts]
+
+        print(f'\n Working with cell line: {cell_line}, on {l1000_subset.shape[0]} perturbations \n')
+
+        for unique_metadata in l1000_subset[metadata].unique():
+            print(f'\n Computing correlations for pair {cell_line}/{unique_metadata} \n')
+
+            moa_subset = l1000_subset[l1000_subset[metadata] == unique_metadata].copy()
+            moa_features = moa_subset[feature_cols]
+
+            if moa_subset.shape[0] > 1:
+
+                combinations = itertools.combinations(moa_subset.index,r=2)
+                correlation_results[cell_line][unique_metadata]= [
+                    run_cor(moa_features.loc[a],moa_features.loc[b],cor_type = cor_type) for a,b in combinations
+                ]
+        # Count total intra-MOA pairs computed for this cell line
+        n_intra = sum(len(v) for v in correlation_results[cell_line].values())
+
+        # Sample the same number of inter-MOA pairs
+        inter_cors = sample_inter_moa_correlations(
+            l1000_subset, feature_cols, n_samples=n_intra, cor_type=cor_type
+        )
+        correlation_results[cell_line]['__inter_moa__'] = inter_cors
+
+    # Summary results
+    summary = {
+        cell_line: {
+            moa: np.mean(np.abs(correlations)) if correlations else np.nan
+            for moa, correlations in moa_dict.items()
+        }
+        for cell_line, moa_dict in correlation_results.items()
+    }
+
+    summary_df = pd.DataFrame(summary).T  # shape: (n_cell_lines, n_moas)
+
+    return summary_df, correlation_results

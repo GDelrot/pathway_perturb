@@ -48,6 +48,8 @@ from typing import Optional
 from sklearn.linear_model import Ridge, ElasticNet
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.multioutput import MultiOutputRegressor
+from sklearn.svm import SVR
+from sklearn.kernel_ridge import KernelRidge
 from sklearn.model_selection import (
     train_test_split,
     GroupKFold,
@@ -201,7 +203,7 @@ def prepare_features(
     #   .values strips the index so we get a plain numpy array for stacking.
 
     cell_ids = l1000_filtered[cell_col].values
-
+    
     basal_trans = ccle_transcriptomics.loc[cell_ids, common_pathways].values
     basal_metab = ccle_metabolomics.loc[cell_ids, common_pathways].values
 
@@ -211,17 +213,6 @@ def prepare_features(
 
     # ── 4. Encode drugs ─────────────────────────────────────────────────
     # PEDAGOGIC  on encoding strategies:
-    #
-    # ONE-HOT: Each drug gets its own binary column [0,0,1,0,...,0]
-    #   Pros: No ordinal assumption, works well with linear models
-    #   Cons: HUGE feature space if many drugs (5k drugs = 5k columns)
-    #
-    # LABEL ENCODING: Each drug gets a single integer (drug_A=0, drug_B=1, ...)
-    #   Pros: Compact, memory efficient
-    #   Cons: Implies ordinal relationship (drug 5 > drug 3?!) — BAD for linear
-    #         models, OK for tree-based models (they split on thresholds anyway)
-    #
-    # DECISION: If #drugs is manageable, use onehot. Otherwise, label.
 
     n_drugs = l1000_filtered[drug_col].nunique()
     logger.info(f"  Unique drugs: {n_drugs}")
@@ -234,7 +225,7 @@ def prepare_features(
     else:
         if drug_encoding == "onehot":
             logger.info(
-                f"  Too many drugs ({n_drugs}) for OneHot — falling back to label encoding. "
+                f"  Too many drugs (%s,{n_drugs}) for OneHot — falling back to label encoding. "
                 f"Consider using drug fingerprints for a better representation."
             )
         encoder = LabelEncoder()
@@ -417,40 +408,38 @@ def get_models(n_targets: int = 1) -> dict:
     → n_estimators=200, learning_rate=0.05, max_depth=6: conservative defaults
     """
 
-    models = {
-        # ── Linear models (need MultiOutput wrapper) ────────────────
-        "Ridge": MultiOutputRegressor(
-            Ridge(alpha=1.0, random_state=42)
-        ),
-        "ElasticNet": MultiOutputRegressor(
-            ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=5000, random_state=42)
-        ),
+    models = {}
 
-        # ── Tree-based models ───────────────────────────────────────
-        # RandomForest is NATIVELY multi-output (no wrapper needed)
-        "RandomForest": RandomForestRegressor(
-            n_estimators=200,
-            max_depth=15,
-            min_samples_leaf=5,    # regularization: don't split if <5 samples in leaf
-            n_jobs=-1,             # use all CPU cores
-            random_state=42,
-        ),
+    # ── LINEAR MODELS ──────────────────────────────────────────────────────
 
-        # GradientBoosting: sklearn's version is NOT natively multi-output
-        # → wrap it. For large datasets, consider HistGradientBoosting (faster).
-        "GradientBoosting": MultiOutputRegressor(
-            GradientBoostingRegressor(
-                n_estimators=200,
-                learning_rate=0.05,
-                max_depth=6,
-                subsample=0.8,       # stochastic GB: use 80% of data per tree
-                random_state=42,
-            )
-        ),
-    }
+    # Ridge
+    models["Ridge"] = MultiOutputRegressor(
+        Ridge(alpha=1.0, random_state=42)
+    )
 
+    # ElasticNet
+    models["ElasticNet"] = MultiOutputRegressor(
+        ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=5000, random_state=42)
+    )
+
+    # Kernel Ridge Regression
+    models["KernelRidge"] = MultiOutputRegressor(
+        KernelRidge(
+            kernel='rbf',
+            alpha=1.0,
+            gamma=1.0 / 200,
+        )
+    )
+
+    # RandomForest
+    models["RandomForest"] = RandomForestRegressor(
+        n_estimators=200,
+        max_depth=15,
+        min_samples_leaf=5,
+        n_jobs=-1,
+        random_state=42,
+    )
     return models
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 3. TRAINING & EVALUATION

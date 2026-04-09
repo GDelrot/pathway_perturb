@@ -9,6 +9,7 @@ from loader import CCLEpaths
 from loader import Loader
 from id_harmonizer import harmonize_ids
 from methods_ML import run_full_pipeline, per_pathway_summary, feature_importance_df
+from analysis import run_gsva
 
 # Paths
 INPUT = Path('/home/gdelrot/pathway_perturb/data')
@@ -45,22 +46,13 @@ def main()->None:
     loader.load_l1000_metadata()
 
     # Load pathways
-    # pathways = Pathways()
-    # pathways.load_gmt(path= str(INPUT / 'KEGG_hsa_pathways_compounds_R117.gmt'),
-    #                   omics = 'metabolomics')
-    # pathways.load_gmt(path=str(INPUT / 'KEGG_hsa_pathways_transcriptomics_R117.gmt'),
-    #                   omics = 'transcriptomics')
+    pathways = Pathways()
+    pathways.load_gmt(path= str(INPUT / 'KEGG_hsa_pathways_compounds_R117.gmt'),
+                      omics = 'metabolomics')
+    pathways.load_gmt(path=str(INPUT / 'KEGG_hsa_pathways_transcriptomics_R117.gmt'),
+                      omics = 'transcriptomics')
 
-    # ===== METABOLOMICS ANALYSIS =====
-    out_metabo = OUTPUT / 'out_metabo'
-    if not out_metabo.is_dir():
-        out_metabo.mkdir()
-
-    out_transcripto = OUTPUT / 'out_rna'
-    if not out_transcripto.is_dir():
-        out_transcripto.mkdir()
-
-    data_proc, _ = loader.preprocess_metabolomics(split_lipids=False,
+    metabo_proc, _ = loader.preprocess_metabolomics(split_lipids=False,
                                                    convert_ids=True,
                                                    remove_unmapped=True)
 
@@ -68,48 +60,61 @@ def main()->None:
     transcripts = loader.ccle_transcriptomics.columns.to_list()
     loader.ccle_transcriptomics.columns = [rna.split('.')[0] for rna in transcripts]
 
-    # conversion = pathways.convert_gene_ids(
-    #     input_ids=list(loader.ccle_transcriptomics.columns),
-    #     source='ensembl.gene',
-    #     target='symbol'
-    # )
-    # mapped = [sym for sym, eid in conversion.items() if eid is not None]
-    # loader.ccle_transcriptomics = loader.ccle_transcriptomics[mapped]
-    # loader.ccle_transcriptomics.columns = [conversion[sym] for sym in mapped]
-    # print(f'\n Shape of annotated genes: {loader.ccle_transcriptomics.shape}')
+    conversion = pathways.convert_gene_ids(
+        input_ids=list(loader.ccle_transcriptomics.columns),
+        source='ensembl.gene',
+        target='symbol'
+    )
+    mapped = [sym for sym, eid in conversion.items() if eid is not None]
+    loader.ccle_transcriptomics = loader.ccle_transcriptomics[mapped]
+    loader.ccle_transcriptomics.columns = [conversion[sym] for sym in mapped]
+    print(f'\n Shape of annotated genes: {loader.ccle_transcriptomics.shape}')
 
     # # ===== PATHWAY INTERSECTIONS =====
-    # common_pathways = pathways.pathway_intersections(
-    #     rna_pathways=pathways.kegg_transcriptomics.pathways_dict,
-    #     metabo_pathways=pathways.kegg_metabolomics.pathways_dict,
-    #     metabolite_ms=data_proc.columns.to_list(),
-    #     rna_ms=loader.ccle_transcriptomics.columns.to_list(),
-    #     l1000_pathways=loader.l1000_pathway_data.columns.to_list(),
-    #     metabo_thresholds=[2, 3, 4, 5]
-    # )
+    common_pathways = pathways.pathway_intersections(
+        rna_pathways=pathways.kegg_transcriptomics.pathways_dict,
+        metabo_pathways=pathways.kegg_metabolomics.pathways_dict,
+        metabolite_ms=metabo_proc.columns.to_list(),
+        rna_ms=loader.ccle_transcriptomics.columns.to_list(),
+        l1000_pathways=loader.l1000_pathway_data.columns.to_list(),
+        metabo_thresholds=[3]
+    )
+
+    # Run GSVA on CCLE datasets
+    gsva_metabo = run_gsva(
+            omics_matrix=metabo_proc,
+            pathways_dict=pathways.kegg_metabolomics.pathways_dict,
+            min_size=3,
+            max_size=1000,
+            omics='metabolomics'
+        )
+
+    gsva_rna = run_gsva(
+            omics_matrix=loader.ccle_transcriptomics,
+            pathways_dict=pathways.kegg_transcriptomics.pathways_dict,
+            min_size=15,
+            max_size=1000,
+            omics='transcriptomics'
+        )
+
+    # Filter data
+    gold_samples = loader.tas_filtering(tas_threshold=0.1)
+    l1000_filtered = loader.l1000_pathway_data.loc[gold_samples].copy()
+    l1000_filtered = l1000_filtered.dropna(axis=1)
 
     # ===== ID HARMONIZATION =====
-    # Maps everything to Cellosaurus (CVCL_XXXX) as common identifier.
-    # CCLE index ("DMS53_LUNG") → CVCL via DepMap RRID
-    # L1000 sig_id → cell_iname via sig_info → CVCL via cell_info
-
     trans_h, metab_h, l1000_h, id_stats = harmonize_ids(
-        ccle_transcriptomics=loader.ccle_transcriptomics,
-        ccle_metabolomics=data_proc,
-        l1000_pathway_data=loader.l1000_pathway_data,
-        sig_info=loader.sig_info,          # ← adapt attribute name if different
-        cell_info=loader.cell_info,        # ← adapt attribute name if different
+        ccle_transcriptomics=gsva_rna,
+        ccle_metabolomics=gsva_metabo,
+        l1000_pathway_data=l1000_filtered,
+        sig_info=loader.sig_info,
+        cell_info=loader.cell_info,
         depmap_annotation=loader.depmap_annotation,
         ccle_annotation=loader.ccle_annotation,
     )
 
-    # ===== ML PIPELINE =====
-    # Now trans_h, metab_h are indexed by CVCL_XXXX
-    # and l1000_h has 'cell_id' (=CVCL) and 'drug_id' columns.
-
-    out_ml = OUTPUT / 'out_ml'
-    if not out_ml.is_dir():
-        out_ml.mkdir()
+    # ML pipeline
+    out_tas = OUTPUT / 'out_ml'
 
     for strategy in ['random', 'cell_line', 'drug']:
         results, data, summary = run_full_pipeline(
@@ -121,7 +126,7 @@ def main()->None:
             split_strategy=strategy,
             test_size=0.2,
         )
-        summary.to_csv(out_ml / f'summary_{strategy}.csv', index=False)
+        summary.to_csv(out_tas / f'summary_{strategy}.csv', index=False)
 
     # Per-pathway R² and feature importances (from last run = drug holdout,
     # rerun random for diagnostics)
@@ -132,14 +137,13 @@ def main()->None:
         cell_col='cell_id',
         drug_col='drug_id',
         split_strategy='random',
-        test_size=0.2,
+        test_size=0.2
     )
-    per_pathway_summary(results_rand).to_csv(out_ml / 'per_pathway_r2.csv')
+    per_pathway_summary(results_rand).to_csv(out_tas / 'per_pathway_r2.csv')
 
     fi = feature_importance_df(results_rand['RandomForest'], data_rand.feature_names, top_n=30)
     if fi is not None:
-        fi.to_csv(out_ml / 'feature_importances_rf.csv', index=False)
-
+        fi.to_csv(out_tas / 'feature_importances_rf.csv', index=False)
 
 if __name__ == '__main__':
     main()

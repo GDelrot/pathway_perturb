@@ -140,7 +140,7 @@ class Loader:
 
         self.l1000_metadata = cast(pd.DataFrame,parse(self.lincs_paths.gctx,
                 col_meta_only=True))
-
+        print(self.l1000_metadata.head())
         print(f' \n\n Loaded metadata with shape: {self.l1000_metadata.shape}')
 
         # Load instance info
