@@ -4,11 +4,9 @@ This script is meant to explore the data as first intention analysis
 from pathlib import Path
 from typing import cast, Dict, List
 from pathways import Pathways
-from loader import LINCSpaths
-from loader import CCLEpaths
-from loader import Loader
-from viz import plot_metabo_histogram, plot_pca, plot_umap, plot_pca_centroids, plot_umap_centroids
-from analysis import run_pca, run_gsva, run_umap
+from __loader__ import LINCSpaths, CCLEpaths, Loader
+from __viz__ import plot_metabo_histogram, plot_pca, plot_umap, plot_pca_centroids, plot_umap_centroids
+from __analysis__ import run_pca, run_gsva, run_umap
 from pathway_coverage import calculate_pathway_coverage, print_coverage_summary, plot_pathway_coverage_histogram
 # Paths
 INPUT = Path('/home/gdelrot/pathway_perturb/data')

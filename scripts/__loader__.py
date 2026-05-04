@@ -171,10 +171,10 @@ class Loader:
 
         # Load compound info (if provided)
         if self.lincs_paths.compound_info:
-            print("  - Loading cell_info...")
+            print("  - Loading compound_info...")
             self.compound_info = pd.read_csv(
                 self.lincs_paths.compound_info, sep='\t', low_memory=False, compression='gzip')
-            print(f"    Loaded {len(self.compound_info):,} cell lines")
+            print(f"    Loaded {len(self.compound_info):,} compound informations")
 
     def check_metadata(self):
         """

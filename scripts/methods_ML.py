@@ -66,10 +66,10 @@ from sklearn.pipeline import Pipeline
 import warnings
 import logging
 import time
+from drug_encoding import DrugEncoder
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 logger = logging.getLogger(__name__)
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. DATA PREPARATION
@@ -121,136 +121,177 @@ def prepare_features(
     ccle_metabolomics: pd.DataFrame,
     cell_col: str = "cell_id",
     drug_col: str = "drug_id",
-    drug_encoding: str = "onehot",
+    drug_encoding: str = "fingerprint",       # ← CHANGED default
+    drug_encoder: Optional[DrugEncoder] = None, # ← NEW parameter
+    compound_info: Optional[pd.DataFrame] = None, # ← NEW parameter
     max_drug_categories: int = 500,
+    fp_radius: int = 2,                        # ← NEW parameter
+    fp_nbits: int = 2048,                      # ← NEW parameter
 ) -> tuple[pd.DataFrame, pd.DataFrame, list, list, object]:
     """
     Build the feature matrix X and target matrix Y from raw datasets.
-
-    STEP-BY-STEP LOGIC
-    -------------------
-    1. Identify pathway columns (common across datasets)
-    2. For each L1000 observation (cell_i, drug_j):
-       - Look up basal transcriptomic pathways from CCLE → features
-       - Look up basal metabolomic pathways from CCLE  → features
-       - Encode drug_j                                 → features
-       - L1000 pathway scores                          → targets
-    3. Concatenate all features → X
-    4. L1000 pathway scores    → Y
-
+ 
+    CHANGES FROM ORIGINAL:
+    - drug_encoding now accepts: 'fingerprint', 'descriptor', 'hybrid',
+      'onehot', 'label'
+    - For fingerprint/descriptor/hybrid: either pass a pre-computed DrugEncoder
+      or pass compound_info and it will be computed on the fly.
+    - fp_radius and fp_nbits control Morgan fingerprint parameters.
+ 
     Parameters
     ----------
-    l1000_df : pd.DataFrame
-        Perturbation data. Must contain `cell_col`, `drug_col`, and pathway columns.
-    ccle_transcriptomics : pd.DataFrame
-        Rows = cell lines, Columns = pathway scores. Index = cell line IDs.
-    ccle_metabolomics : pd.DataFrame
-        Same structure as above.
-    cell_col, drug_col : str
-        Column names in l1000_df identifying cell lines and drugs.
     drug_encoding : str
-        'onehot' or 'label'. Onehot is better for linear models;
-        label encoding is more memory-efficient for tree models.
-    max_drug_categories : int
-        If #drugs > this, fall back to label encoding (onehot would explode
-        the feature space — e.g., 5000 drugs = 5000 extra columns).
-
-    Returns
-    -------
-    X_df, Y_df, feature_names, pathway_names, drug_encoder
+        'fingerprint' → Morgan fingerprints (ECFP) from SMILES
+        'descriptor'  → RDKit physicochemical descriptors (~200 features)
+        'hybrid'      → fingerprint + descriptors concatenated
+        'onehot'      → one-hot encoding (original behavior)
+        'label'       → integer label encoding (original behavior)
+    drug_encoder : DrugEncoder, optional
+        Pre-computed encoder. If None and drug_encoding is
+        fingerprint/descriptor/hybrid, compound_info must be provided.
+    compound_info : pd.DataFrame, optional
+        Must contain 'pert_id' and 'canonical_smiles' columns.
+        Required if drug_encoder is None and using structure-based encoding.
     """
     logger.info("Preparing features...")
-
-    # ── 1. Find common pathway columns ──────────────────────────────────
-    # PEDAGOGIC NOTE: We need columns that are pathway scores in ALL datasets.
-    # Metadata columns (cell_id, drug_id, dose, etc.) must be excluded.
+ 
+    # ── 1. Find common pathway columns (UNCHANGED) ──────────────────
     metadata_cols = {cell_col, drug_col, "dose", "time", "pert_type", "sig_id",
                      "pert_id", "pert_iname", "cell_mfc_name", "det_plate"}
-
+ 
     l1000_pathway_cols = [c for c in l1000_df.columns if c not in metadata_cols]
     trans_pathway_cols = list(ccle_transcriptomics.columns)
     metab_pathway_cols = list(ccle_metabolomics.columns)
-
-    # Intersection: only pathways measured in ALL three datasets
+ 
     common_pathways = sorted(
         set(l1000_pathway_cols) & set(trans_pathway_cols) & set(metab_pathway_cols)
     )
     logger.info(f"  Common pathways across all datasets: {len(common_pathways)}")
-
+ 
     if len(common_pathways) == 0:
         raise ValueError(
-            "No common pathway columns found! Check that your column names match "
-            "across datasets (e.g., 'HALLMARK_APOPTOSIS' vs 'Apoptosis')."
+            "No common pathway columns found! Check column name consistency."
         )
-
-    # ── 2. Filter L1000 to cell lines present in BOTH CCLE datasets ────
+ 
+    # ── 2. Filter to common cell lines (UNCHANGED) ──────────────────
     common_cells = (
         set(l1000_df[cell_col].unique())
         & set(ccle_transcriptomics.index)
         & set(ccle_metabolomics.index)
     )
     logger.info(f"  Cell lines in all 3 datasets: {len(common_cells)}")
+    with open("/home/gdelrot/pathway_perturb/data/common_cells.txt", "w") as f:
+        f.write("\n".join(sorted(common_cells)))
 
     l1000_filtered = l1000_df[l1000_df[cell_col].isin(common_cells)].copy()
     logger.info(f"  L1000 observations after cell-line filtering: {len(l1000_filtered)}")
-
-    # ── 3. Build basal feature matrix ───────────────────────────────────
-    # For each L1000 row, look up the cell line's basal state.
-    # This is a LEFT JOIN on cell_id.
-    #
-    # WHY .loc[cell_ids] and .values?
-    # → We align CCLE rows to match L1000 row order via the cell_id column.
-    #   .values strips the index so we get a plain numpy array for stacking.
-
+ 
+    # ── 3. Build basal feature matrix (UNCHANGED) ───────────────────
     cell_ids = l1000_filtered[cell_col].values
-    
+ 
     basal_trans = ccle_transcriptomics.loc[cell_ids, common_pathways].values
     basal_metab = ccle_metabolomics.loc[cell_ids, common_pathways].values
-
-    # Feature names: prefix to distinguish source
+ 
     trans_feat_names = [f"trans_{p}" for p in common_pathways]
     metab_feat_names = [f"metab_{p}" for p in common_pathways]
-
-    # ── 4. Encode drugs ─────────────────────────────────────────────────
-    # PEDAGOGIC  on encoding strategies:
-
+ 
+    # ── 4. Encode drugs (MODIFIED) ──────────────────────────────────
+ 
     n_drugs = l1000_filtered[drug_col].nunique()
     logger.info(f"  Unique drugs: {n_drugs}")
-
-    if drug_encoding == "onehot" and n_drugs <= max_drug_categories:
+ 
+    drug_ids_array = l1000_filtered[drug_col].values
+ 
+    if drug_encoding in ("fingerprint", "descriptor", "hybrid"):
+        # ─── Structure-based encoding ───────────────────────────────
+        # Either use a pre-computed encoder or build one from compound_info
+        if drug_encoder is None:
+            if compound_info is None:
+                raise ValueError(
+                    f"drug_encoding='{drug_encoding}' requires either a "
+                    f"pre-computed drug_encoder or compound_info with SMILES."
+                )
+            # Build encoder on the fly
+            from drug_encoding import (
+                compute_morgan_fingerprints,
+                compute_descriptors,
+                compute_hybrid_encoding,
+            )
+            if drug_encoding == "fingerprint":
+                drug_encoder = compute_morgan_fingerprints(
+                    compound_info, radius=fp_radius, n_bits=fp_nbits
+                )
+            elif drug_encoding == "descriptor":
+                drug_encoder = compute_descriptors(compound_info)
+            elif drug_encoding == "hybrid":
+                drug_encoder = compute_hybrid_encoding(
+                    compound_info, radius=fp_radius, n_bits=fp_nbits
+                )
+ 
+        # Transform: look up each drug_id → its encoding vector
+        drug_features = drug_encoder.transform(drug_ids_array)
+        drug_feat_names = drug_encoder.feature_names
+ 
+        # Report coverage
+        covered = sum(1 for d in np.unique(drug_ids_array) if d in drug_encoder.drug_to_idx)
+        logger.info(
+            f"  Drug encoding: {drug_encoding} → {drug_features.shape[1]} features | "
+            f"Coverage: {covered}/{n_drugs} drugs have SMILES"
+        )
+ 
+        # Drop rows where drug has no encoding (all-zero vector)
+        row_sums = drug_features.sum(axis=1)
+        valid_mask = row_sums > 0
+        if (~valid_mask).any():
+            n_dropped = (~valid_mask).sum()
+            logger.warning(
+                f"  Dropping {n_dropped} observations with no drug encoding "
+                f"({n_dropped/len(valid_mask)*100:.1f}%)"
+            )
+            drug_features = drug_features[valid_mask]
+            basal_trans = basal_trans[valid_mask]
+            basal_metab = basal_metab[valid_mask]
+            l1000_filtered = l1000_filtered.iloc[np.where(valid_mask)[0]]
+            cell_ids = cell_ids[valid_mask]
+            drug_ids_array = drug_ids_array[valid_mask]
+ 
+        encoder_out = drug_encoder
+ 
+    elif drug_encoding == "onehot" and n_drugs <= max_drug_categories:
         encoder = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
         drug_features = encoder.fit_transform(l1000_filtered[[drug_col]])
         drug_feat_names = [f"drug_{c}" for c in encoder.get_feature_names_out()]
+        encoder_out = encoder
         logger.info(f"  Drug encoding: OneHot → {drug_features.shape[1]} features")
+ 
     else:
         if drug_encoding == "onehot":
             logger.info(
-                f"  Too many drugs (%s,{n_drugs}) for OneHot — falling back to label encoding. "
-                f"Consider using drug fingerprints for a better representation."
+                f"  Too many drugs ({n_drugs}) for OneHot — falling back to label."
             )
         encoder = LabelEncoder()
-        drug_features = encoder.fit_transform(l1000_filtered[drug_col]).reshape(-1, 1)
+        drug_features = encoder.fit_transform(drug_ids_array).reshape(-1, 1)
         drug_feat_names = ["drug_label"]
+        encoder_out = encoder
         logger.info(f"  Drug encoding: Label → 1 feature")
-
-    # ── 5. Assemble X and Y ─────────────────────────────────────────────
+ 
+    # ── 5. Assemble X and Y (UNCHANGED logic) ──────────────────────
     X = np.hstack([basal_trans, basal_metab, drug_features])
     feature_names = trans_feat_names + metab_feat_names + drug_feat_names
-
+ 
     Y = l1000_filtered[common_pathways].values
     pathway_names = common_pathways
-
-    # Store as DataFrames for traceability
+ 
     X_df = pd.DataFrame(X, columns=feature_names, index=l1000_filtered.index)
     Y_df = pd.DataFrame(Y, columns=pathway_names, index=l1000_filtered.index)
-
-    # Attach metadata for splitting later
+ 
     X_df["__cell_id__"] = cell_ids
-    X_df["__drug_id__"] = l1000_filtered[drug_col].values
-
+    X_df["__drug_id__"] = drug_ids_array
+ 
     logger.info(f"  Final X shape: {X_df.shape}  |  Final Y shape: {Y_df.shape}")
+ 
+    return X_df, Y_df, feature_names, pathway_names, encoder_out
 
-    return X_df, Y_df, feature_names, pathway_names, encoder
 
 
 def split_data(
@@ -737,7 +778,6 @@ def cross_validate_model(
 # ═══════════════════════════════════════════════════════════════════════════
 # 6. CONVENIENCE: RUN FULL PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════
-
 def run_full_pipeline(
     l1000_df: pd.DataFrame,
     ccle_transcriptomics: pd.DataFrame,
@@ -748,46 +788,51 @@ def run_full_pipeline(
     test_size: float = 0.2,
     run_cv: bool = False,
     cv_folds: int = 5,
-) -> tuple[dict, PreparedData, pd.DataFrame]:
+    # ── NEW parameters ──────────────────────────────────────────────
+    drug_encoding: str = "fingerprint",
+    compound_info: Optional[pd.DataFrame] = None,
+    drug_encoder: Optional[DrugEncoder] = None,
+    fp_radius: int = 2,
+    fp_nbits: int = 2048,
+) -> tuple:
     """
-    End-to-end pipeline: prepare → split → train → evaluate.
-
-    Returns
-    -------
-    results      : dict of ModelResult
-    data         : PreparedData
-    summary_df   : comparison DataFrame
+    End-to-end pipeline with drug encoding support.
+ 
+    NEW PARAMETERS
+    --------------
+    drug_encoding : str
+        'fingerprint', 'descriptor', 'hybrid', 'onehot', 'label'
+    compound_info : pd.DataFrame
+        LINCS compound info table with SMILES.
+    drug_encoder : DrugEncoder
+        Pre-computed encoder (optional, saves recomputation across runs).
+    fp_radius, fp_nbits : int
+        Morgan fingerprint parameters.
     """
-    # Step 1: Prepare features
+    # Step 1: Prepare features (with new drug encoding)
     X_df, Y_df, feat_names, pw_names, drug_enc = prepare_features(
         l1000_df, ccle_transcriptomics, ccle_metabolomics,
-        cell_col=cell_col, drug_col=drug_col,
+        cell_col=cell_col,
+        drug_col=drug_col,
+        drug_encoding=drug_encoding,
+        drug_encoder=drug_encoder,
+        compound_info=compound_info,
+        fp_radius=fp_radius,
+        fp_nbits=fp_nbits,
     )
-
-    # Step 2: Split
+ 
+    # Step 2: Split (unchanged)
+    from methods_ML import split_data, train_and_evaluate, summarize_results
     data = split_data(
         X_df, Y_df, feat_names, pw_names, drug_enc,
         strategy=split_strategy, test_size=test_size,
     )
-
-    # Step 3: Train & evaluate
+ 
+    # Step 3: Train & evaluate (unchanged)
     results = train_and_evaluate(data)
-
-    # Step 4: Summarize
+ 
+    # Step 4: Summarize (unchanged)
     summary_df = summarize_results(results)
     logger.info("\n" + summary_df.to_string(index=False))
-
-    # Step 5 (optional): Cross-validation
-    if run_cv:
-        logger.info("\n--- Cross-Validation ---")
-        models = get_models()
-        for name, model in models.items():
-            logger.info(f"CV for {name}:")
-            cv_result = cross_validate_model(
-                data.X_train, data.y_train, model, n_folds=cv_folds
-            )
-            logger.info(
-                f"  → Mean R²={cv_result['mean']:.4f} ± {cv_result['std']:.4f}"
-            )
-
+ 
     return results, data, summary_df

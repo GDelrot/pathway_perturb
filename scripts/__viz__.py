@@ -202,33 +202,23 @@ def plot_metabo_histogram(metabo_data:pd.DataFrame,
 
     return
 
-def plot_moa_correlations(cor_dict:Dict,
+def plot_moa_correlations(median_cor:pd.DataFrame,
+                          metadata:str,
+                          cell_line:str,
                           figname:str):
 
-    # Build long-format with intra values per MOA + inter baseline repeated for each
-    rows = []
-    for cell_line, moa_dict in cor_dict.items():
-        inter_cors = moa_dict.get('__inter_moa__', [])
+    inter_moa = median_cor['__inter_moa__'].iloc[0]
+    median_cor = median_cor.drop(columns='__inter_moa__')
 
-        for moa, cors in moa_dict.items():
-            if moa == '__inter_moa__':
-                continue
-            # Intra-MOA correlations
-            for c in cors:
-                rows.append({'cell_line': cell_line, 'moa': moa,
-                            'group': 'intra', 'correlation': c})
-            # Paired inter-MOA baseline for this MOA
-            for c in inter_cors:
-                rows.append({'cell_line': cell_line, 'moa': moa,
-                            'group': 'inter', 'correlation': c})
+    # Melt
+    cor_long = median_cor.melt(var_name=metadata, value_name='correlation')
+    cor_long['group'] = 'intra'
 
-    cor_long = pd.DataFrame(rows)
-
-    # Now plot: each MOA has two boxes side by side (intra vs inter)
     fig, ax = plt.subplots(figsize=(14, 6))
-    sns.boxplot(data=cor_long, x='moa', y='correlation', hue='group', ax=ax)
-    ax.axhline(0, ls='--', color='grey', alpha=0.5)
+    sns.barplot(data=cor_long, x=metadata, y='correlation', hue='group', ax=ax)
+    ax.axhline(inter_moa, ls='--', color='red', alpha=0.5)
     ax.set_xticklabels(ax.get_xticklabels(), rotation=90)
-    ax.set_title('Intra-MOA vs Inter-MOA correlations')
+    ax.set_title(f'Intra-MOA vs Inter-MOA correlations — {cell_line}')
     plt.tight_layout()
     plt.savefig(figname)
+    plt.close()

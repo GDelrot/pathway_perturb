@@ -4,6 +4,7 @@ the l1000 data from sigcom lincs
 import itertools
 import random
 from typing import Dict, List, cast
+from venv import logger
 
 import gseapy as gp
 import numpy as np
@@ -14,7 +15,7 @@ from scipy.stats import spearmanr
 from sklearn.decomposition import  PCA
 from sklearn.preprocessing import StandardScaler
 from umap import UMAP
-from loader import Loader
+from __loader__ import Loader
 
 def run_pca(matrix: pd.DataFrame, n_components: int = 10):
     """Takes any matrix, returns scores + fitted model."""
@@ -141,7 +142,8 @@ def run_gsva(omics_matrix: pd.DataFrame,
 
     return gsva_matrix
 
-def annotate_drug_info(l1000_obj:Loader,
+def annotate_drug_info(perturbations:pd.DataFrame,
+                       l1000_obj:Loader,
                        drug:str='moa'):
     """
     Annotates the l1000 pathway scores with drug metadata
@@ -150,24 +152,24 @@ def annotate_drug_info(l1000_obj:Loader,
         drug (str, optional): _description_. Defaults to 'moa'.
     """
     annotated_l1000 = pd.DataFrame()
-    if drug == 'moa':
 
-        # Duplicates in chemical tables due to several targets per drugs
-        chemical_table = l1000_obj.compound_info.copy()
-        sig_info = l1000_obj.sig_info.loc[:,['pert_id','sig_id']]
+    # Duplicates in chemical tables due to several targets per drugs
+    chemical_table = l1000_obj.compound_info.copy()
+    sig_info = l1000_obj.sig_info.loc[:,['pert_id','sig_id']]
 
-        chemical_table = chemical_table.drop(columns=['target']).drop_duplicates(subset='pert_id').copy()
-        drug_metadata = pd.merge(sig_info, chemical_table, on='pert_id',how = 'left')
-        drug_metadata = drug_metadata.dropna(subset=drug)
-        drug_metadata = drug_metadata.set_index('sig_id')[drug]
+    chemical_table = chemical_table.drop(columns=['target']).drop_duplicates(subset='pert_id').copy()
+    drug_metadata = pd.merge(sig_info, chemical_table, on='pert_id',how = 'left')
+    drug_metadata = drug_metadata.dropna(subset=drug)
+    drug_metadata = drug_metadata.set_index('sig_id')[drug]
 
-        pert_drugs = set(drug_metadata.index)
-        l1000_index = set(l1000_obj.l1000_pathway_data.index)
+    pert_drugs = set(drug_metadata.index)
+    l1000_index = set(perturbations.index)
 
-        common_samples = l1000_index.intersection(pert_drugs)
-        l1000_pathway_data = l1000_obj.l1000_pathway_data.loc[list(common_samples)].copy()
-        annotated_l1000 = l1000_pathway_data.join(drug_metadata,how='left')
-        l1000_index = set(annotated_l1000.index)
+    common_samples = l1000_index.intersection(pert_drugs)
+    l1000_pathway_data = perturbations.loc[list(common_samples)].copy()
+    annotated_l1000 = l1000_pathway_data.join(drug_metadata,how='left')
+
+    del l1000_pathway_data; gc.collect()
 
     return annotated_l1000
 
@@ -187,11 +189,10 @@ def annotate_cell_info(l1000_drug_ann:pd.DataFrame,
     cell_annotations = cell_annotations.set_index('sig_id')['cell_iname']
 
     annotated_df = l1000_drug_ann.join(cell_annotations,how='left')
+    del l1000_drug_ann;gc.collect()
 
     if filter_cell_line:
         annotated_df = annotated_df[annotated_df['cell_iname'].isin(filter_cell_line)]
-    print(annotated_df.shape)
-    print(annotated_df.head())
 
     return annotated_df
 
@@ -207,24 +208,27 @@ def run_cor(vector_a:np.array,
     b_vec = vector_b
 
     if cor_type == 'pearson':
-        
-        cor_stat = pearsonr(a_vec,b_vec).statistic
+
+        cor_stat = np.abs(pearsonr(a_vec,b_vec).statistic)
     elif cor_type == 'spearman':
 
-        cor_stat = spearmanr(a_vec,b_vec).statistic
+        cor_stat = np.abs(spearmanr(a_vec,b_vec).statistic)
     else:
         raise ValueError(f'Unsupported cor type: {cor_type}')
 
     return cor_stat
 
-def sample_inter_moa_correlations(l1000_subset, feature_cols, n_samples, cor_type='pearson'):
+def sample_inter_moa_correlations(l1000_subset,metadata, feature_cols, n_samples, cor_type='pearson'):
     """
     Sample random pairs of perturbations from DIFFERENT MOAs.
     n_samples should match the total number of intra-MOA pairs for comparability.
     """
-    indexed_by_moa = l1000_subset.groupby('moa').groups  # {moa: [sig_ids]}
+    indexed_by_moa = l1000_subset.groupby(metadata).groups  # {moa: [sig_ids]}
     moas = list(indexed_by_moa.keys())
-    
+
+    if len(moas) < 2:
+        return [] 
+
     inter_cors = []
     features = l1000_subset[feature_cols]
     
@@ -234,77 +238,103 @@ def sample_inter_moa_correlations(l1000_subset, feature_cols, n_samples, cor_typ
         # Pick one random perturbation from each
         sig_a = random.choice(indexed_by_moa[moa_a])
         sig_b = random.choice(indexed_by_moa[moa_b])
-        
+
         cor = run_cor(features.loc[sig_a], features.loc[sig_b], cor_type=cor_type)
         inter_cors.append(cor)
-    
+
     return inter_cors
 
-def run_moa_signature_correlations(l1000_obj:Loader,
-                                filter_cell_line=None,
-                               metadata:str='moa',
-                               cor_type:str='pearson'):
-    """Compute intra- vs inter-MOA signature correlations per cell line.
+def run_moa_signature_correlations_chunked(
+    perturbations:pd.DataFrame,
+    l1000_obj: Loader,
+    cell_line: str,
+    metadata: str = 'moa',
+    cor_type: str = 'pearson',
+    max_pairs:int= 500
+) -> tuple[pd.DataFrame | None, dict | None]:
+    """Compute intra- vs inter-MOA correlations for a SINGLE cell line.
+    Args:
+        max_pairs: If set, randomly subsample each MOA's pairs to at most
+                   this many. Useful when cell lines have highly variable
+                   numbers of perturbations per MOA.
 
-    For each cell line, computes pairwise correlations for all perturbation
-    pairs sharing the same MOA (intra), then samples an equal number of
-    cross-MOA pairs (inter, stored under '__inter_moa__').
-
-    Returns a summary DataFrame of mean absolute correlations
-    (shape: n_cell_lines x n_moas) and the full correlation_results dict.
+    Returns (summary_row, corr_dict) or (None, None) if no data.
+    summary_row is a 1-row DataFrame (index=cell_line, cols=MOA names).
     """
-    # Annotate drug info
-    l1000_drug_annotated = annotate_drug_info(l1000_obj=l1000_obj,
-                                              drug=metadata)
-
-    # Annotate cell info
-    pair_annotated = annotate_cell_info(l1000_drug_ann=l1000_drug_annotated,
-                                        filter_cell_line=filter_cell_line,
-                                        l1000_obj=l1000_obj)
-    
+    l1000_drug_annotated = annotate_drug_info(perturbations = perturbations, l1000_obj=l1000_obj, drug=metadata)
+    pair_annotated = annotate_cell_info(
+        l1000_drug_ann=l1000_drug_annotated,
+        filter_cell_line=[cell_line],
+        l1000_obj=l1000_obj,
+    )
+    if pair_annotated.empty:
+        return None, None
     metadata_cols = [metadata, 'cell_iname']
     feature_cols = [c for c in pair_annotated.columns if c not in metadata_cols]
-    correlation_results = {}
+    logger.info(pair_annotated.head())
+    cl_data = pair_annotated[pair_annotated['cell_iname'] == cell_line]
+    if cl_data.shape[0] < 2:
+        return None, None
 
-    for cell_line in pair_annotated['cell_iname'].unique():
+    corr_dict: dict[str, list[float]] = {}
 
-        correlation_results[cell_line] = {}
+    for unique_meta in cl_data[metadata].unique():
+        
+        moa_subset = cl_data[cl_data[metadata] == unique_meta]
+        logger.debug('Subset daframe before correlations: \n %s of shape %s',
+                     moa_subset.head(),moa_subset.shape)
+        if moa_subset.shape[0] < 2:
+            continue
+        logger.info('N different perturbations for combo %s, %s: %s\n',
+                    cell_line, unique_meta, moa_subset.shape[0])
+        features = moa_subset[feature_cols].values  
+        
+        pairs = list(itertools.combinations(range(moa_subset.shape[0]), r=2))
 
-        cl_perts = pair_annotated[pair_annotated['cell_iname'] == cell_line].index
-        l1000_subset = pair_annotated.loc[cl_perts]
+        # ── Subsampling ────────────────────────────────────────────────────
+        if max_pairs is not None and len(pairs) > max_pairs:
+            pairs = random.sample(pairs, max_pairs)
+        # ──────────────────────────────────────────────────────────────────
 
-        print(f'\n Working with cell line: {cell_line}, on {l1000_subset.shape[0]} perturbations \n')
-
-        for unique_metadata in l1000_subset[metadata].unique():
-            print(f'\n Computing correlations for pair {cell_line}/{unique_metadata} \n')
-
-            moa_subset = l1000_subset[l1000_subset[metadata] == unique_metadata].copy()
-            moa_features = moa_subset[feature_cols]
-
-            if moa_subset.shape[0] > 1:
-
-                combinations = itertools.combinations(moa_subset.index,r=2)
-                correlation_results[cell_line][unique_metadata]= [
-                    run_cor(moa_features.loc[a],moa_features.loc[b],cor_type = cor_type) for a,b in combinations
-                ]
-        # Count total intra-MOA pairs computed for this cell line
-        n_intra = sum(len(v) for v in correlation_results[cell_line].values())
-
-        # Sample the same number of inter-MOA pairs
-        inter_cors = sample_inter_moa_correlations(
-            l1000_subset, feature_cols, n_samples=n_intra, cor_type=cor_type
+        logger.info(
+            "MOA %s | cell %s | %d perturbations → %d pairs (max_pairs=%s)",
+          unique_meta, cell_line, moa_subset.shape[0], len(pairs), max_pairs,
         )
-        correlation_results[cell_line]['__inter_moa__'] = inter_cors
+        
+        corr_dict[unique_meta] = [
+            _fast_cor(features[a], features[b], cor_type) for a, b in pairs
+        ]
 
-    # Summary results
+    n_intra = sum(len(v) for v in corr_dict.values())
+    if n_intra == 0:
+        return None, None
+
+    inter_cors = sample_inter_moa_correlations(
+        cl_data, metadata, feature_cols, n_samples=n_intra, cor_type=cor_type
+    )
+    corr_dict['__inter_moa__'] = inter_cors
+
     summary = {
-        cell_line: {
-            moa: np.mean(np.abs(correlations)) if correlations else np.nan
-            for moa, correlations in moa_dict.items()
-        }
-        for cell_line, moa_dict in correlation_results.items()
+        moa: np.median(np.abs(cors)) if cors else np.nan
+        for moa, cors in corr_dict.items()
     }
+    summary_row = pd.DataFrame(summary, index=[cell_line])
 
-    summary_df = pd.DataFrame(summary).T  # shape: (n_cell_lines, n_moas)
+    n_above = (summary_row > summary_row['__inter_moa__'].iloc[0]).sum().sum()
 
-    return summary_df, correlation_results
+    logger.info(
+        '\n Fraction of medians above inter threshold: %s',
+        n_above/(summary_row.shape[1]-1))
+
+    return summary_row, corr_dict
+
+def _fast_cor(a: np.ndarray, b: np.ndarray, cor_type: str) -> float:
+    """Correlation between two 1-D arrays.
+    Uses numpy for Pearson (avoids pandas overhead).
+    Falls back to scipy for Spearman.
+    """
+    if cor_type == 'pearson':
+        return float(np.corrcoef(a, b)[0, 1])
+    else:
+        from scipy.stats import spearmanr
+        return float(spearmanr(a, b).correlation)

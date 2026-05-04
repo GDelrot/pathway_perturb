@@ -1,11 +1,13 @@
-
 """
 smiles_similarity.py
 Compute pairwise Tanimoto similarity between drug SMILES,
 then cluster them via hierarchical clustering.
 Adapted and simplified from johaGL / smpath (CBiB).
 """
-
+from ast import arg
+import sys
+import logging
+import argparse
 import numpy as np
 import pandas as pd
 from rdkit import Chem
@@ -15,14 +17,46 @@ from scipy.spatial.distance import squareform
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Optional
-from loader import Loader
-from loader import CCLEpaths
-from loader import LINCSpaths
+from __loader__ import Loader
+from __loader__ import CCLEpaths
+from __loader__ import LINCSpaths
+from sklearn.metrics import (
+        silhouette_score,
+        davies_bouldin_score,
+        calinski_harabasz_score
+    )
+import psutil
+import time
+
+def log_memory(tag: str, t0: float) -> float:
+    proc = psutil.Process()
+    rss_gb = proc.memory_info().rss / 1e9
+    elapsed = f"  +{time.time()-t0:.1f}s" if t0 else ""
+    log.info(f"[MEM {tag}] RSS = {rss_gb:.2f} GB{elapsed}")
+    return time.time()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
+)
+log = logging.getLogger(__name__)
 
 # Paths
 INPUT = Path('/home/gdelrot/pathway_perturb/data')
 OUTPUT = Path('/home/gdelrot/pathway_perturb/outputs/out_exploration_2')
 MNT_L1000 = Path('/mnt/cbib/l1000/data/')
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--cutoff",
+        type=float,
+        required=True,
+        help="Distance cutoff for hierarchical clustering (e.g. 0.4)"
+    )
+    return parser.parse_args() 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1.  SMILES  →  Morgan fingerprints
@@ -51,12 +85,11 @@ def smiles_to_fingerprints(
         valid_smiles.append(smi)
         fps.append(fp)
     return valid_smiles, fps
- 
- 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 2.  Pairwise Tanimoto similarity matrix
 # ──────────────────────────────────────────────────────────────────────────────
- 
+
 def compute_tanimoto_matrix(fps: list) -> np.ndarray:
     """
     Compute the symmetric N×N Tanimoto similarity matrix from a list of
@@ -71,12 +104,11 @@ def compute_tanimoto_matrix(fps: list) -> np.ndarray:
             arr[j, i] = sim
     np.fill_diagonal(arr, 1.0)
     return arr
- 
- 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 3.  Hierarchical clustering
 # ──────────────────────────────────────────────────────────────────────────────
- 
+
 def cluster_by_similarity(
     similarity_matrix: np.ndarray,
     cutoff: float = 0.4,
@@ -133,10 +165,13 @@ def smiles_to_cluster_df(
     sim_matrix : np.ndarray    – N×N similarity matrix
     Z          : np.ndarray    – linkage matrix
     """
-    smiles_list = smiles_series.dropna().tolist()
+    t0 = log_memory("start", None)
 
+    smiles_list = smiles_series.dropna().tolist()
+    log_memory("start conversion to fingerprints",t0)
     valid_smiles, fps = smiles_to_fingerprints(smiles_list, radius=radius, n_bits=n_bits)
-    print(f"[INFO] {len(valid_smiles)} / {len(smiles_list)} SMILES parsed successfully.")
+    log_memory("after conversion",t0)
+    log.info("%d / %d SMILES parsed successfully.", len(valid_smiles), len(smiles_list))
 
     sim_matrix = compute_tanimoto_matrix(fps)
 
@@ -155,7 +190,18 @@ def smiles_to_cluster_df(
         result_df["name"] = result_df["canonical_smiles"].map(name_map)
 
     n_clusters = result_df["cluster_id"].nunique()
-    print(f"[INFO] {n_clusters} clusters found at distance cutoff = {cutoff}.")
+
+    # Compute clustering metrics
+    distance_matrix = 1.0 - sim_matrix
+    metrics = evaluate_clustering(distance_matrix, clusters)
+
+    log.info(
+        "cutoff=%.2f  clusters=%d  silhouette=%.4f ",
+        cutoff,
+        n_clusters,
+        metrics.get("silhouette", float("nan"))
+    )
+
     return result_df, sim_matrix, Z
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -164,7 +210,7 @@ def smiles_to_cluster_df(
 
 def plot_dendrogram(Z: np.ndarray, cutoff: float,
                     output_path: Optional[Path] = None) -> None:
-    fig, ax = plt.subplots(figsize=(12, 4))
+    _, ax = plt.subplots(figsize=(12, 4))
     dendrogram(Z, ax=ax, no_labels=True, color_threshold=cutoff)
     ax.axhline(y=cutoff, color="red", linestyle="--", label=f"cutoff = {cutoff}")
     ax.set_title("Hierarchical clustering of drug SMILES (Tanimoto distance)")
@@ -176,8 +222,27 @@ def plot_dendrogram(Z: np.ndarray, cutoff: float,
         print(f"[INFO] Dendrogram saved to {output_path}")
     plt.show()
 
-if __name__ == '__main__':
+def evaluate_clustering(distance_matrix, labels):
+    """
+    Evaluate clustering without needing linkage matrix.
     
+    Parameters
+    ----------
+    distance_matrix : np.ndarray (N, N)
+        Pairwise distance or dissimilarity matrix
+    labels : np.ndarray (N,)
+        Cluster assignment for each point
+    
+    Returns
+    -------
+    dict with silhouette, Davies-Bouldin, etc.
+    """
+    return {
+        'silhouette': silhouette_score(distance_matrix, labels)
+    }
+
+if __name__ == '__main__':
+
     lincs_sigcom = LINCSpaths(
         gctx=str(MNT_L1000 / 'cp_coeff_mat.gctx'),
         pathway=str(INPUT / 'gsea_l1000.parquet'),
@@ -194,14 +259,18 @@ if __name__ == '__main__':
         metabo_mapping= str(INPUT / 'metabo_mapping.csv'),
         depmap_annotation = str (INPUT / 'Depmap_annotation.csv')
     )
-    
+    moa_group = sys.argv[1]
     loader = Loader(lincs_paths=lincs_sigcom,ccle_paths=ccle_data)
     loader.load_l1000_metadata()
-    
-    compound_info = loader.compound_info
-    compound_info = compound_info.dropna(subset='canonical_smiles')
-    print(compound_info.shape)
 
+    print('-'*80 , '\n')
+    print(f'Computing SMILES clusters for {moa_group} drugs... \n')
+
+    compound_info = loader.compound_info
+    compound_info = compound_info[compound_info['moa'] == moa_group]
+    compound_info = compound_info.dropna(subset='canonical_smiles').drop_duplicates(subset='canonical_smiles')
+
+    print(f'N SMILES for moa: {moa_group} = {len(compound_info['canonical_smiles'].unique())}')
     result_df, sim_matrix, Z = smiles_to_cluster_df(
         smiles_series=compound_info["canonical_smiles"],
         names_series=compound_info["cmap_name"],
@@ -211,8 +280,4 @@ if __name__ == '__main__':
         linkage_method="average",
         threshold_similarity=None,
     )
-
-    print(result_df.sort_values("cluster_id"))
-    result_df.to_csv(OUTPUT / "drug_clusters.csv", index=False)
-
-    plot_dendrogram(Z, cutoff=0.6, output_path=OUTPUT / "dendrogram.pdf")
+    result_df.to_csv(OUTPUT / f'smiles_clusters_{moa_group}.csv')

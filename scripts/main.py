@@ -4,12 +4,12 @@ of drug responses
 """
 from pathlib import Path
 from pathways import Pathways
-from loader import LINCSpaths
-from loader import CCLEpaths
-from loader import Loader
+from __loader__ import LINCSpaths
+from __loader__ import CCLEpaths
+from __loader__ import Loader
 from id_harmonizer import harmonize_ids
 from methods_ML import run_full_pipeline, per_pathway_summary, feature_importance_df
-from analysis import run_gsva
+from __analysis__ import run_gsva
 
 # Paths
 INPUT = Path('/home/gdelrot/pathway_perturb/data')
@@ -98,7 +98,7 @@ def main()->None:
         )
 
     # Filter data
-    gold_samples = loader.tas_filtering(tas_threshold=0.1)
+    gold_samples = loader.tas_filtering(tas_threshold=0.2)
     l1000_filtered = loader.l1000_pathway_data.loc[gold_samples].copy()
     l1000_filtered = l1000_filtered.dropna(axis=1)
 
@@ -113,9 +113,25 @@ def main()->None:
         ccle_annotation=loader.ccle_annotation,
     )
 
-    # ML pipeline
-    out_tas = OUTPUT / 'out_ml'
+    trans_h.to_csv(INPUT / 'harmonized_transcriptomics.csv')
+    metab_h.to_csv(INPUT / 'harmonized_metabolomics.csv')
+    l1000_h.to_csv(INPUT / 'harmonized_l1000.csv')
 
+    # ML pipeline
+    from drug_encoding import compute_morgan_fingerprints
+    
+    drug_encoder = compute_morgan_fingerprints(
+        compound_info=loader.compound_info,  # from your Loader class
+        drug_id_col="pert_id",               # adjust to match your drug_col
+        smiles_col="canonical_smiles",       # adjust to match your compound_info columns
+        radius=2,                            # ECFP4
+        n_bits=2048,
+    )
+    
+    # ── Run pipeline with fingerprints ──────────────────────────────────────
+    out_tas = OUTPUT / 'out_ml_fingerprint'
+    out_tas.mkdir(exist_ok=True)
+    
     for strategy in ['random', 'cell_line', 'drug']:
         results, data, summary = run_full_pipeline(
             l1000_df=l1000_h,
@@ -125,25 +141,60 @@ def main()->None:
             drug_col='drug_id',
             split_strategy=strategy,
             test_size=0.2,
+            # ── NEW ─────────────────────────
+            drug_encoding='fingerprint',
+            drug_encoder=drug_encoder,      # pre-computed, not recomputed each loop
         )
-        summary.to_csv(out_tas / f'summary_{strategy}.csv', index=False)
-
-    # Per-pathway R² and feature importances (from last run = drug holdout,
-    # rerun random for diagnostics)
-    results_rand, data_rand, _ = run_full_pipeline(
-        l1000_df=l1000_h,
-        ccle_transcriptomics=trans_h,
-        ccle_metabolomics=metab_h,
-        cell_col='cell_id',
-        drug_col='drug_id',
-        split_strategy='random',
-        test_size=0.2
+        summary.to_csv(out_tas / f'summary_{strategy}_fp.csv', index=False)
+    
+    
+    # ── Option B: compare encodings systematically ──────────────────────────
+    from drug_encoding import compute_descriptors, compute_hybrid_encoding
+    
+    desc_encoder = compute_descriptors(
+        compound_info=loader.compound_info,
+        drug_id_col="pert_id",
+        smiles_col="canonical_smiles",
     )
-    per_pathway_summary(results_rand).to_csv(out_tas / 'per_pathway_r2.csv')
+    
+    hybrid_encoder = compute_hybrid_encoding(
+        compound_info=loader.compound_info,
+        drug_id_col="pert_id",
+        smiles_col="canonical_smiles",
+    )
+    
+    encoding_configs = {
+        'onehot':      {'drug_encoding': 'onehot',      'drug_encoder': None},
+        'fingerprint': {'drug_encoding': 'fingerprint',  'drug_encoder': drug_encoder},
+        'descriptor':  {'drug_encoding': 'descriptor',   'drug_encoder': desc_encoder},
+        'hybrid':      {'drug_encoding': 'hybrid',        'drug_encoder': hybrid_encoder},
+    }
+    
+    comparison_rows = []
+    for enc_name, enc_kwargs in encoding_configs.items():
+        for strategy in ['random', 'cell_line', 'drug']:
+            results, data, summary = run_full_pipeline(
+                l1000_df=l1000_h,
+                ccle_transcriptomics=trans_h,
+                ccle_metabolomics=metab_h,
+                cell_col='cell_id',
+                drug_col='drug_id',
+                split_strategy=strategy,
+                test_size=0.2,
+                **enc_kwargs,
+            )
+            for _, row in summary.iterrows():
+                comparison_rows.append({
+                    'encoding': enc_name,
+                    'split': strategy,
+                    'model': row['Model'],
+                    'R2': row['R²'],
+                    'MSE': row['MSE'],
+                })
+    
+    comparison_df = pd.DataFrame(comparison_rows)
+    comparison_df.to_csv(out_tas / 'encoding_comparison.csv', index=False)
 
-    fi = feature_importance_df(results_rand['RandomForest'], data_rand.feature_names, top_n=30)
-    if fi is not None:
-        fi.to_csv(out_tas / 'feature_importances_rf.csv', index=False)
 
 if __name__ == '__main__':
     main()
